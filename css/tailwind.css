@@ -7,7 +7,8 @@
 /* Core theme configuration */
 @theme {
   /* Font families */
-  --font-sans: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji',
+  --font-sans:
+    var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji',
     'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
 
   /* Colors */
@@ -98,6 +99,15 @@
     }
     & :where(code):not(pre code) {
       color: var(--color-indigo-500);
+      background: color-mix(in srgb, var(--color-indigo-500) 12%, transparent);
+      border: 1px solid color-mix(in srgb, var(--color-indigo-500) 25%, transparent);
+      border-radius: var(--radius-sm);
+      padding: 0.1em 0.35em;
+      font-size: 0.95em;
+    }
+    & :where(code):not(pre code)::before,
+    & :where(code):not(pre code)::after {
+      content: none;
     }
   }
 

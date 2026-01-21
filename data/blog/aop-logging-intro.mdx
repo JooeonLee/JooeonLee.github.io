@@ -1,0 +1,212 @@
+---
+title: ’요청부터 레포지토리까지, 한눈에 파악하는 계층형 로깅 시스템 구축기’
+date: '2024-06-06'
+summary: ’Logging with Spring AOP’
+tags: [’spring’, ’aop’, ’logging’]
+draft: false
+---
+
+개발을 하다 보면 “이 요청은 대체 어디서 막힌 걸까?”, “이 에러는 어떤 파라미터 때문에 발생했을까?”라는 질문을 수없이 던지게 됩니다. 단순한 `log.info()`만으로는 부족함을 느껴, **Filter와 AOP, 그리고 MDC**를 조합하여 요청의 전체 흐름을 시각적으로 파악할 수 있는 로깅 시스템을 구축해 보았습니다.
+
+---
+
+## 1. 왜 이런 로깅 시스템이 필요한가?
+
+기본적인 로그는 시간 순서대로 쌓일 뿐, 특정 요청이 내부적으로 어떤 서비스와 레포지토리를 거치는지 한눈에 보기 어렵습니다. 특히 멀티 스레드 환경에서는 여러 요청의 로그가 뒤섞여 추적이 거의 불가능해지죠.
+
+이번 작업을 통해 해결하고자 했던 핵심 목표는 세 가지였습니다.
+
+1. **트래픽 분석:** 요청/응답 바디를 포함한 전체 HTTP 트래픽 확인.
+2. **로직 추적:** 계층(Controller-Service-Repo) 간의 호출 관계 가시화.
+3. **맥락(Context) 유지:** 고유 요청 ID를 모든 로그에 남겨 흩어진 로그를 하나로 묶기.
+
+---
+
+## 2. HTTP 요청의 시작과 끝: Filter 기반 로깅
+
+가장 먼저 요청의 입구인 `Filter`에서 URI, 메서드, 바디, 그리고 처리 시간을 기록하도록 설계했습니다.
+
+### 기술적 포인트: “이미 읽어버린 바디는 다시 읽을 수 없다”
+
+Servlet의 `InputStream`은 한 번 읽으면 소모되어 버립니다. 이를 해결하기 위해 Spring이 제공하는 `ContentCachingRequestWrapper`를 도입했습니다. 이를 통해 로그를 남기면서도 컨트롤러에 바디를 안전하게 전달할 수 있었습니다.
+
+```java
+package com.graydang.app.global.logging.filter;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectWriter;
+import com.graydang.app.global.logging.config.LoggingProperties;
+import jakarta.servlet.*;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
+import org.springframework.web.util.ContentCachingRequestWrapper;
+import org.springframework.web.util.ContentCachingResponseWrapper;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+
+@Component
+@RequiredArgsConstructor
+public class HttpRequestLoggingFilter implements Filter {
+
+    private static final Logger log = LoggerFactory.getLogger(HttpRequestLoggingFilter.class);
+    private static final int MAX_LOG_LENGTH = 1024;
+    private static final ObjectWriter PRETTY_PRINTER = new ObjectMapper().writerWithDefaultPrettyPrinter();
+    private final LoggingProperties loggingProperties;
+
+    @Override
+    public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
+            throws IOException, ServletException {
+
+        // 설정에 따라 HTTP 로깅 활성화 여부 결정
+        if (!loggingProperties.getHttpRequest()) {
+            chain.doFilter(request, response);
+            return;
+        }
+
+        if (!(request instanceof HttpServletRequest) || !(response instanceof HttpServletResponse)) {
+            chain.doFilter(request, response);
+            return;
+        }
+
+        ContentCachingRequestWrapper httpRequest = new ContentCachingRequestWrapper((HttpServletRequest) request);
+        ContentCachingResponseWrapper httpResponse = new ContentCachingResponseWrapper((HttpServletResponse) response);
+
+        String method = httpRequest.getMethod();
+        String uri = httpRequest.getRequestURI();
+
+        log.info("[HTTP] START {} {}", method, uri);
+
+        long start = System.currentTimeMillis();
+        try {
+            chain.doFilter(httpRequest, httpResponse);
+        } finally {
+            long duration = System.currentTimeMillis() - start;
+            logBody(httpRequest, httpResponse, duration, uri);
+            httpResponse.copyBodyToResponse(); // 캐싱된 바디를 실제 응답 스트림으로 복사
+        }
+    }
+
+    private void logBody(ContentCachingRequestWrapper request, ContentCachingResponseWrapper response, long duration, String uri) {
+        // 바디 추출 및 Pretty Print 로직 (중략)
+        log.info("[HTTP] END {} {} ({} ms)", response.getStatus(), uri, duration);
+    }
+}
+```
+
+---
+
+## 3. 계층 간 흐름을 시각화하는 Indent 로깅 (AOP)
+
+로그의 호출 관계를 한눈에 파악하기 위해 **Indent(들여쓰기)** 방식을 도입했습니다. 이를 위해 반복되는 로직을 `LoggingSupport` 추상 클래스에 모았습니다.
+
+### 설계 전략: MDC 활용
+
+`MDC(Mapped Diagnostic Context)`에 현재 호출의 깊이(`logDepth`)를 저장하여, 메서드에 진입할 때마다 들여쓰기를 추가합니다.
+
+```java
+package com.graydang.app.global.logging.util;
+
+import com.graydang.app.global.logging.config.LoggingProperties;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.aspectj.lang.JoinPoint;
+import org.slf4j.MDC;
+
+@Slf4j
+@RequiredArgsConstructor
+public abstract class LoggingSupport {
+
+    private static final String LOG_DEPTH_KEY = "logDepth";
+    private final LoggingProperties loggingProperties;
+
+    protected void increaseDepth() {
+        String depthStr = MDC.get(LOG_DEPTH_KEY);
+        int depth = depthStr != null ? Integer.parseInt(depthStr) : 0;
+        MDC.put(LOG_DEPTH_KEY, String.valueOf(depth + 1));
+    }
+
+    protected void decreaseDepth() {
+        String depthStr = MDC.get(LOG_DEPTH_KEY);
+        int depth = depthStr != null ? Integer.parseInt(depthStr) : 1;
+        MDC.put(LOG_DEPTH_KEY, String.valueOf(Math.max(0, depth - 1)));
+    }
+
+    protected void logMethodEntry(JoinPoint joinPoint, String layer) {
+        if (!loggingProperties.getEnabled()) return;
+        increaseDepth();
+        String indent = "  ".repeat(getCurrentDepth());
+        log.info("{}[{}] ENTER => {}", indent, layer, joinPoint.getSignature().toShortString());
+    }
+
+    protected void logMethodExit(JoinPoint joinPoint, Object result, String layer) {
+        if (!loggingProperties.getEnabled()) return;
+        String indent = "  ".repeat(getCurrentDepth());
+        log.info("{}[{}] RETURN <= {}", indent, layer, joinPoint.getSignature().toShortString());
+        decreaseDepth();
+    }
+}
+```
+
+---
+
+## 4. 로그에 ’맥락’을 더하다: Trace ID와 User ID
+
+로그가 아무리 정돈되어도 “이게 어느 요청에서 시작된 건가?”를 모르면 의미가 없습니다. `JwtFilter`에서 두 가지 정보를 MDC에 주입하여 모든 로그 라인의 앞에 붙도록 했습니다.
+
+1. **requestId (UUID):** 요청마다 고유 ID를 생성해 하나의 요청이 만드는 로그들을 그룹핑합니다.
+2. **userId:** 로그인한 사용자의 정보를 남겨 장애 대응 시 특정 사용자의 흐름만 추적합니다.
+
+```java
+// JwtFilter의 doFilterInternal 내부
+String requestUri = request.getRequestURI();
+MDC.put("requestUri", requestUri);
+MDC.put("requestId", UUID.randomUUID().toString()); // Trace ID 생성
+
+// 인증 성공 시
+MDC.put("userId", String.valueOf(userId));
+```
+
+---
+
+## 5. 운영 환경을 고려한 성능 최적화
+
+로깅은 비용입니다. 특히 바디를 매번 문자열로 변환하고 JSON으로 파싱하는 작업은 운영 환경에서 오버헤드가 큽니다. 이를 위해 `application.yml` 설정을 통해 환경별로 로깅 옵션을 분리했습니다.
+
+YAML
+
+```YAML
+# application-prod.yml
+logging:
+  custom:
+    enabled: true        # 계층형 로깅은 유지
+    http-request: false  # 운영환경에서는 무거운 HTTP 바디 로깅 비활성화
+```
+
+---
+
+## 6. 마치며: 결과물과 교훈
+
+시스템을 적용한 후, 로그는 아래와 같이 직관적으로 변했습니다.
+
+Plaintext
+
+```bash
+[7a2f...] [userId=123] [CONTROLLER] ENTER => PostController.create()
+[7a2f...] [userId=123]   [SERVICE] ENTER => PostService.save()
+[7a2f...] [userId=123]     [REPOSITORY] ENTER => PostRepository.save()
+[7a2f...] [userId=123]     [REPOSITORY] RETURN <= PostRepository.save()
+[7a2f...] [userId=123]   [SERVICE] RETURN <= PostService.save()
+[7a2f...] [userId=123] [CONTROLLER] RETURN <= PostController.create()
+```
+
+### 🧐 배운 점
+
+- **MDC의 생명주기 관리:** MDC는 `ThreadLocal` 기반이므로 요청이 끝나면 반드시 `MDC.clear()`를 해주어야 합니다. 그렇지 않으면 스레드 풀 환경에서 다른 사용자의 요청에 이전 데이터가 남는 심각한 문제가 발생할 수 있습니다.
+- **예외 처리 로깅의 중요성:** 성공적인 반환뿐만 아니라 예외 발생 시에도 `decreaseDepth()`가 호출되도록 `AfterThrowing` 어드바이스를 꼼꼼히 챙기는 것이 계층 구조를 유지하는 핵심이었습니다.
+
+단순히 기록하는 것을 넘어, **의미 있는 데이터**를 남기는 로깅 시스템 구축기였습니다.
