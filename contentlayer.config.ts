@@ -8,6 +8,7 @@ import { fromHtmlIsomorphic } from 'hast-util-from-html-isomorphic'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import { remarkAlert } from 'remark-github-blockquote-alert'
+import remarkSmartypants from 'remark-smartypants'
 import {
   remarkExtractFrontmatter,
   remarkCodeTitles,
@@ -155,6 +156,7 @@ export default makeSource({
     remarkPlugins: [
       remarkExtractFrontmatter,
       remarkGfm,
+      [remarkSmartypants, { dashes: false, ellipses: false }],
       remarkCodeTitles,
       remarkMath,
       remarkImgToJsx,
