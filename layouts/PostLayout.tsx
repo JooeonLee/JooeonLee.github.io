@@ -9,6 +9,7 @@ import Image from '@/components/Image'
 import Tag from '@/components/Tag'
 import siteMetadata from '@/data/siteMetadata'
 import ScrollTopAndComment from '@/components/ScrollTopAndComment'
+import GoatCounterStats from '@/components/GoatCounterStats'
 
 const editUrl = (path) => `${siteMetadata.siteRepo}/blob/main/data/${path}`
 const discussUrl = (path) =>
@@ -87,10 +88,22 @@ export default function PostLayout({ content, authorDetails, next, prev, childre
                             </Link>
                           )}
                         </dd>
+                        <dt className="sr-only">GitHub</dt>
+                        <dd>
+                          {(author.github || siteMetadata.github) && (
+                            <Link
+                              href={author.github || siteMetadata.github}
+                              className="text-primary-500 hover:text-primary-600 dark:hover:text-primary-400"
+                            >
+                              GitHub
+                            </Link>
+                          )}
+                        </dd>
                       </dl>
                     </li>
                   ))}
                 </ul>
+                <GoatCounterStats path={`/${path}`} />
               </dd>
             </dl>
             <div className="divide-y divide-gray-200 xl:col-span-3 xl:row-span-2 xl:pb-0 dark:divide-gray-700">

@@ -11,6 +11,9 @@ const siteMetadata = {
   siteLogo: `${process.env.BASE_PATH || ''}/static/images/blog-logo.png`,
   siteLogoDark: `${process.env.BASE_PATH || ''}/static/images/blog-logo-white.png`,
   socialBanner: `${process.env.BASE_PATH || ''}/static/images/twitter-card.png`,
+  goatCounter: {
+    site: 'jooeonlee',
+  },
   mastodon: 'https://mastodon.social/@mastodonuser',
   email: 'address@yoursite.com',
   github: 'https://github.com',
